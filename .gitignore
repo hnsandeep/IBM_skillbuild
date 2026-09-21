@@ -10,11 +10,14 @@ build/
 
 # Environment — never commit real keys
 .env
+frontend/.env
 
 # Node
 frontend/node_modules/
 frontend/dist/
-frontend/.env          # real values only — .env.example is safe to commit
+
+# Office temporary lock files (e.g. ~$SafeInbox_AI_Presentation.pptx)
+~$*
 
 # OS
 .DS_Store
