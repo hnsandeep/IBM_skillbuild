@@ -4,13 +4,12 @@ services:
     runtime: python
     region: oregon
     plan: free
-    # Pin Python version so Render doesn't silently upgrade
     pythonVersion: "3.11.9"
     buildCommand: pip install -r requirements.txt
     startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT --workers 2
     healthCheckPath: /health
     envVars:
-      - key: ANTHROPIC_API_KEY
+      - key: OPENROUTER_KEY
         sync: false   # set manually in Render dashboard → Environment
       - key: SAFE_BROWSING_KEY
-        sync: false   # set manually in Render dashboard → Environment
+        sync: false   # optional — set manually in Render dashboard
