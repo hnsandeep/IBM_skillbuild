@@ -2,7 +2,11 @@
 SafeInbox AI — Real-Time AI-Powered Phishing & Social Engineering Detector
 FastAPI backend: single-file, production-ready.
 
-Improvements over v1:
+LLM provider: CometAPI (https://api.cometapi.com) — a cost-effective Claude
+proxy that accepts the standard Anthropic SDK with a custom base_url.
+Set COMETAPI_KEY in your environment (or .env file).
+
+Other features:
 - load_dotenv() called at startup so local .env is respected
 - url validated as a proper URL via Pydantic HttpUrl
 - message capped at 10 000 chars (prompt-injection / abuse guard)
@@ -44,23 +48,32 @@ logger = logging.getLogger("safeinbox")
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
-MAX_MESSAGE_LEN = 10_000          # chars — prevent prompt-injection / runaway costs
+MAX_MESSAGE_LEN   = 10_000          # chars — prevent prompt-injection / runaway costs
 SAFE_BROWSING_URL = "https://safebrowsing.googleapis.com/v4/threatMatches:find"
-START_TIME = time.time()
+COMET_BASE_URL    = "https://api.cometapi.com"   # CometAPI Claude proxy
+LLM_MODEL         = "claude-fable-5-1"           # CometAPI model name
+START_TIME        = time.time()
 
 # ---------------------------------------------------------------------------
 # Environment
 # ---------------------------------------------------------------------------
-ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
+COMETAPI_KEY      = os.getenv("COMETAPI_KEY", "")
 SAFE_BROWSING_KEY = os.getenv("SAFE_BROWSING_KEY", "")
 
-if not ANTHROPIC_API_KEY:
-    logger.warning("ANTHROPIC_API_KEY is not set — /analyze will return 502")
+if not COMETAPI_KEY:
+    logger.warning("COMETAPI_KEY is not set — /analyze will return 502")
 if not SAFE_BROWSING_KEY:
     logger.warning("SAFE_BROWSING_KEY is not set — URL threat-intel checks disabled")
 
-# Anthropic SDK client (thread-safe, reuse across requests)
-anthropic_client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY) if ANTHROPIC_API_KEY else None
+# Anthropic SDK pointed at CometAPI base URL (thread-safe, reuse across requests)
+anthropic_client = (
+    anthropic.Anthropic(
+        base_url=COMET_BASE_URL,
+        api_key=COMETAPI_KEY,
+        max_retries=0,          # fail fast — let FastAPI handle retries/errors
+    )
+    if COMETAPI_KEY else None
+)
 
 # ---------------------------------------------------------------------------
 # App
@@ -149,12 +162,12 @@ def _build_user_prompt(message: str, url: Optional[str]) -> str:
 # Helpers (synchronous — called via asyncio.to_thread)
 # ---------------------------------------------------------------------------
 def _call_llm(message: str, url: Optional[str]) -> dict:
-    """Synchronous Claude call. Run in a thread pool — never call directly from async."""
+    """Synchronous Claude call via CometAPI. Run in a thread pool — never call directly from async."""
     if not anthropic_client:
-        raise RuntimeError("ANTHROPIC_API_KEY is not configured.")
+        raise RuntimeError("COMETAPI_KEY is not configured.")
 
     response = anthropic_client.messages.create(
-        model="claude-3-5-haiku-20241022",
+        model=LLM_MODEL,
         max_tokens=600,
         system=SYSTEM_PROMPT,
         messages=[{"role": "user", "content": _build_user_prompt(message, url)}],
@@ -245,7 +258,9 @@ async def health():
         "service": "SafeInbox AI",
         "version": "1.1.0",
         "uptime_seconds": round(time.time() - START_TIME, 1),
-        "anthropic_configured": bool(ANTHROPIC_API_KEY),
+        "llm_provider": "CometAPI",
+        "llm_model": LLM_MODEL,
+        "cometapi_configured": bool(COMETAPI_KEY),
         "safe_browsing_configured": bool(SAFE_BROWSING_KEY),
     }
 
