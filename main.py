@@ -2,19 +2,20 @@
 SafeInbox AI — Real-Time AI-Powered Phishing & Social Engineering Detector
 FastAPI backend: single-file, production-ready.
 
-LLM provider: CometAPI (https://api.cometapi.com) — a cost-effective Claude
-proxy that accepts the standard Anthropic SDK with a custom base_url.
-Set COMETAPI_KEY in your environment (or .env file).
+LLM provider: OpenRouter (https://openrouter.ai)
+  - Uses the OpenAI-compatible REST API via httpx (no extra SDK needed)
+  - Set OPENROUTER_KEY in your .env file
+  - Model: anthropic/claude-3.5-haiku  (fast, cost-efficient)
 
 Other features:
 - load_dotenv() called at startup so local .env is respected
 - url validated as a proper URL via Pydantic HttpUrl
 - message capped at 10 000 chars (prompt-injection / abuse guard)
-- Blocking LLM + Safe Browsing calls moved off the async event loop
-  via asyncio.to_thread — no more request starvation under load
-- CORS allow_credentials=False when allow_origins="*" (browser spec fix)
-- Startup check logs a clear warning when keys are missing
-- /health includes process uptime
+- Blocking LLM + Safe Browsing calls run via asyncio.to_thread
+- CORS allow_credentials=False (browser spec compliant)
+- Global error handler — never exposes tracebacks
+- /health includes uptime + provider info
+- GET / redirects to /docs
 """
 
 import asyncio
@@ -27,13 +28,12 @@ from typing import Optional
 import httpx
 from dotenv import load_dotenv
 
-# Load .env before anything else reads os.getenv()
+# Load .env before anything reads os.getenv()
 load_dotenv()
 
-import anthropic
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, RedirectResponse
 from pydantic import BaseModel, Field, HttpUrl, field_validator
 
 # ---------------------------------------------------------------------------
@@ -48,43 +48,38 @@ logger = logging.getLogger("safeinbox")
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
-MAX_MESSAGE_LEN   = 10_000          # chars — prevent prompt-injection / runaway costs
-SAFE_BROWSING_URL = "https://safebrowsing.googleapis.com/v4/threatMatches:find"
-COMET_BASE_URL    = "https://api.cometapi.com"   # CometAPI Claude proxy
-LLM_MODEL         = "claude-fable-5-1"           # CometAPI model name
-START_TIME        = time.time()
+MAX_MESSAGE_LEN    = 10_000
+START_TIME         = time.time()
+
+# OpenRouter config
+OPENROUTER_BASE    = "https://openrouter.ai/api/v1/chat/completions"
+LLM_MODEL          = "anthropic/claude-3-haiku"      # OpenRouter model ID
+APP_NAME           = "SafeInbox AI"
+APP_URL            = "https://github.com/hnsandeep/IBM_skillbuild"
+
+# Google Safe Browsing
+SAFE_BROWSING_URL  = "https://safebrowsing.googleapis.com/v4/threatMatches:find"
 
 # ---------------------------------------------------------------------------
 # Environment
 # ---------------------------------------------------------------------------
-COMETAPI_KEY      = os.getenv("COMETAPI_KEY", "")
+OPENROUTER_KEY    = os.getenv("OPENROUTER_KEY", "")
 SAFE_BROWSING_KEY = os.getenv("SAFE_BROWSING_KEY", "")
 
-if not COMETAPI_KEY:
-    logger.warning("COMETAPI_KEY is not set — /analyze will return 502")
+if not OPENROUTER_KEY:
+    logger.warning("OPENROUTER_KEY is not set — /analyze will return 502")
 if not SAFE_BROWSING_KEY:
     logger.warning("SAFE_BROWSING_KEY is not set — URL threat-intel checks disabled")
 
-# Anthropic SDK pointed at CometAPI base URL (thread-safe, reuse across requests)
-anthropic_client = (
-    anthropic.Anthropic(
-        base_url=COMET_BASE_URL,
-        api_key=COMETAPI_KEY,
-        max_retries=0,          # fail fast — let FastAPI handle retries/errors
-    )
-    if COMETAPI_KEY else None
-)
-
 # ---------------------------------------------------------------------------
-# App
+# FastAPI app
 # ---------------------------------------------------------------------------
 app = FastAPI(
     title="SafeInbox AI",
     description="Real-Time AI-Powered Phishing & Social Engineering Detector",
-    version="1.1.0",
+    version="1.2.0",
 )
 
-# CORS — credentials must be False when origins is wildcard (browser spec)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -121,11 +116,11 @@ class AnalyzeResponse(BaseModel):
     explanation: str
     url_flagged_by_safe_browsing: bool = False
     safe_browsing_threats: list[str] = []
-    analyzed_url: Optional[str] = Field(None, description="The URL that was checked, if any")
+    analyzed_url: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------
-# Prompts
+# Prompt
 # ---------------------------------------------------------------------------
 SYSTEM_PROMPT = """You are SafeInbox AI, an expert cybersecurity analyst specialising in
 phishing, smishing, vishing, and social-engineering attacks.
@@ -151,7 +146,9 @@ Signals to detect (non-exhaustive):
 
 
 def _build_user_prompt(message: str, url: Optional[str]) -> str:
-    parts = [f"Analyze the following message for phishing/social-engineering signals.\n\nMESSAGE:\n{message}"]
+    parts = [
+        f"Analyze the following message for phishing/social-engineering signals.\n\nMESSAGE:\n{message}"
+    ]
     if url:
         parts.append(f"\nURL FOUND IN MESSAGE:\n{url}")
     parts.append("\nReturn ONLY the JSON object.")
@@ -159,79 +156,116 @@ def _build_user_prompt(message: str, url: Optional[str]) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Helpers (synchronous — called via asyncio.to_thread)
+# Helper: call OpenRouter (synchronous — run via asyncio.to_thread)
 # ---------------------------------------------------------------------------
 def _call_llm(message: str, url: Optional[str]) -> dict:
-    """Synchronous Claude call via CometAPI. Run in a thread pool — never call directly from async."""
-    if not anthropic_client:
-        raise RuntimeError("COMETAPI_KEY is not configured.")
+    """
+    Call OpenRouter's OpenAI-compatible endpoint using httpx.
+    Runs in a thread pool — never call directly from async context.
+    """
+    if not OPENROUTER_KEY:
+        raise RuntimeError("OPENROUTER_KEY is not configured.")
 
-    response = anthropic_client.messages.create(
-        model=LLM_MODEL,
-        max_tokens=600,
-        system=SYSTEM_PROMPT,
-        messages=[{"role": "user", "content": _build_user_prompt(message, url)}],
-    )
+    headers = {
+        "Authorization":  f"Bearer {OPENROUTER_KEY}",
+        "Content-Type":   "application/json",
+        "HTTP-Referer":   APP_URL,      # required by OpenRouter
+        "X-Title":        APP_NAME,     # shown in OpenRouter dashboard
+    }
 
-    raw = response.content[0].text.strip()
-    logger.info("LLM response: %s", raw)
+    payload = {
+        "model": LLM_MODEL,
+        "max_tokens": 600,
+        "temperature": 0.1,             # low temp for consistent JSON output
+        "messages": [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user",   "content": _build_user_prompt(message, url)},
+        ],
+    }
+
+    try:
+        with httpx.Client(timeout=45.0) as client:
+            resp = client.post(OPENROUTER_BASE, headers=headers, json=payload)
+            resp.raise_for_status()
+    except httpx.HTTPStatusError as exc:
+        logger.error("OpenRouter HTTP error %s: %s", exc.response.status_code, exc.response.text)
+        raise RuntimeError(f"OpenRouter API error: {exc.response.status_code} — {exc.response.text}") from exc
+    except httpx.RequestError as exc:
+        logger.error("OpenRouter request error: %s", exc)
+        raise RuntimeError(f"Could not reach OpenRouter: {exc}") from exc
+
+    data = resp.json()
+    raw  = data["choices"][0]["message"]["content"].strip()
+    logger.info("LLM raw response: %s", raw)
+
+    # Strip accidental code fences
+    if raw.startswith("```"):
+        raw = raw.split("```")[1]
+        if raw.startswith("json"):
+            raw = raw[4:]
+        raw = raw.strip()
 
     try:
         parsed = json.loads(raw)
     except json.JSONDecodeError as exc:
-        raise RuntimeError("LLM returned non-JSON.") from exc
+        logger.error("LLM non-JSON response: %s", raw)
+        raise RuntimeError("LLM returned non-JSON output.") from exc
 
     score = max(0, min(100, int(parsed.get("risk_score", 50))))
     return {
-        "risk_score": score,
-        "risk_level": parsed.get("risk_level", _score_to_level(score)),
-        "red_flags":  parsed.get("red_flags", []) if isinstance(parsed.get("red_flags"), list) else [],
-        "explanation": parsed.get("explanation", "No explanation available."),
+        "risk_score":   score,
+        "risk_level":   parsed.get("risk_level", _score_to_level(score)),
+        "red_flags":    parsed.get("red_flags", []) if isinstance(parsed.get("red_flags"), list) else [],
+        "explanation":  parsed.get("explanation", "No explanation available."),
     }
 
 
+# ---------------------------------------------------------------------------
+# Helper: Google Safe Browsing (synchronous — run via asyncio.to_thread)
+# ---------------------------------------------------------------------------
 def _call_safe_browsing(url: str) -> tuple[bool, list[str]]:
-    """Synchronous Safe Browsing call. Run in a thread pool. Never raises."""
+    """Never raises — returns (False, []) on any failure."""
     if not SAFE_BROWSING_KEY:
         return False, []
 
     payload = {
-        "client": {"clientId": "safeinbox-ai", "clientVersion": "1.1.0"},
+        "client": {"clientId": "safeinbox-ai", "clientVersion": "1.2.0"},
         "threatInfo": {
             "threatTypes": [
-                "MALWARE",
-                "SOCIAL_ENGINEERING",
-                "UNWANTED_SOFTWARE",
-                "POTENTIALLY_HARMFUL_APPLICATION",
+                "MALWARE", "SOCIAL_ENGINEERING",
+                "UNWANTED_SOFTWARE", "POTENTIALLY_HARMFUL_APPLICATION",
             ],
-            "platformTypes": ["ANY_PLATFORM"],
+            "platformTypes":    ["ANY_PLATFORM"],
             "threatEntryTypes": ["URL"],
-            "threatEntries": [{"url": url}],
+            "threatEntries":    [{"url": url}],
         },
     }
-
     try:
         with httpx.Client(timeout=10.0) as client:
-            resp = client.post(SAFE_BROWSING_URL, params={"key": SAFE_BROWSING_KEY}, json=payload)
+            resp = client.post(
+                SAFE_BROWSING_URL,
+                params={"key": SAFE_BROWSING_KEY},
+                json=payload,
+            )
             resp.raise_for_status()
             matches = resp.json().get("matches", [])
-
         if matches:
             threats = list({m.get("threatType", "UNKNOWN") for m in matches})
-            logger.info("Safe Browsing flagged %s — threats: %s", url, threats)
+            logger.info("Safe Browsing flagged %s — %s", url, threats)
             return True, threats
-
         return False, []
-
     except Exception as exc:  # noqa: BLE001
         logger.error("Safe Browsing error: %s", exc)
         return False, []
 
 
+# ---------------------------------------------------------------------------
+# Helper: score → risk level string
+# ---------------------------------------------------------------------------
 def _score_to_level(score: int) -> str:
-    if score < 25:  return "Low"
-    if score < 50:  return "Medium"
-    if score < 75:  return "High"
+    if score < 25: return "Low"
+    if score < 50: return "Medium"
+    if score < 75: return "High"
     return "Critical"
 
 
@@ -250,17 +284,23 @@ async def _global_handler(request: Request, exc: Exception):
 # ---------------------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------------------
+@app.get("/", include_in_schema=False)
+async def root():
+    """Redirect bare root to the interactive API docs."""
+    return RedirectResponse(url="/docs")
+
+
 @app.get("/health", tags=["ops"])
 async def health():
     """Liveness probe — returns 200 with service metadata."""
     return {
-        "status": "ok",
-        "service": "SafeInbox AI",
-        "version": "1.1.0",
-        "uptime_seconds": round(time.time() - START_TIME, 1),
-        "llm_provider": "CometAPI",
-        "llm_model": LLM_MODEL,
-        "cometapi_configured": bool(COMETAPI_KEY),
+        "status":                   "ok",
+        "service":                  "SafeInbox AI",
+        "version":                  "1.2.0",
+        "uptime_seconds":           round(time.time() - START_TIME, 1),
+        "llm_provider":             "OpenRouter",
+        "llm_model":                LLM_MODEL,
+        "openrouter_configured":    bool(OPENROUTER_KEY),
         "safe_browsing_configured": bool(SAFE_BROWSING_KEY),
     }
 
@@ -271,22 +311,22 @@ async def analyze(req: AnalyzeRequest):
     Analyze a suspicious message (and optional URL) for phishing signals.
 
     Pipeline:
-    1. Claude LLM scores the message text for social-engineering patterns.
+    1. OpenRouter / Claude 3.5 Haiku scores the message for social-engineering patterns.
     2. If a URL is provided, Google Safe Browsing is queried in parallel.
     3. A Safe Browsing hit adds +30 to the score (capped at 100).
     """
     url_str = str(req.url).rstrip("/") if req.url else None
-
     logger.info("analyze — msg_len=%d url=%s", len(req.message), url_str)
 
-    # Run LLM (and optionally Safe Browsing) concurrently in thread pool
-    # so neither blocks the event loop.
+    # Run LLM + Safe Browsing concurrently (both blocking → thread pool)
     if url_str:
-        llm_task = asyncio.to_thread(_call_llm, req.message, url_str)
-        sb_task  = asyncio.to_thread(_call_safe_browsing, url_str)
-        (llm_result, (url_flagged, sb_threats)) = await asyncio.gather(
-            llm_task, sb_task, return_exceptions=False
-        )
+        try:
+            llm_result, (url_flagged, sb_threats) = await asyncio.gather(
+                asyncio.to_thread(_call_llm, req.message, url_str),
+                asyncio.to_thread(_call_safe_browsing, url_str),
+            )
+        except RuntimeError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
     else:
         try:
             llm_result = await asyncio.to_thread(_call_llm, req.message, None)
@@ -294,16 +334,12 @@ async def analyze(req: AnalyzeRequest):
             raise HTTPException(status_code=502, detail=str(exc)) from exc
         url_flagged, sb_threats = False, []
 
-    # Unpack LLM result (may raise if _call_llm failed inside gather)
-    if isinstance(llm_result, Exception):
-        raise HTTPException(status_code=502, detail=str(llm_result))
+    score: int  = llm_result["risk_score"]
+    level: str  = llm_result["risk_level"]
+    flags: list = llm_result["red_flags"]
+    explanation = llm_result["explanation"]
 
-    score: int      = llm_result["risk_score"]
-    level: str      = llm_result["risk_level"]
-    flags: list     = llm_result["red_flags"]
-    explanation     = llm_result["explanation"]
-
-    # Apply Safe Browsing boost
+    # Safe Browsing score boost
     if url_flagged:
         score = min(100, score + 30)
         level = _score_to_level(score)
