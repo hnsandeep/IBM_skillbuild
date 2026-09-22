@@ -566,7 +566,80 @@ tb(s,"IBM SkillsBuild  ·  OpenRouter  ·  Anthropic  ·  Google  ·  FastAPI, R
 num(s,19)
 
 # ════════════════════════════════════════════════════════════════════════════
-# SLIDE 20 — Thank You
+# SLIDE 20 — How IBM Bob Built This Project
+# ════════════════════════════════════════════════════════════════════════════
+s = slide(); bg(s)
+rect(s, 0, 0, W, Inches(0.12), C_ACCENT)
+rect(s, 0, H-Inches(0.05), W, Inches(0.05), C_ACCENT)
+
+# ── Hero banner ──
+rect(s, 0, Inches(0.12), W, Inches(1.18), RGBColor(0x1A,0x1F,0x4B))
+tb(s,"🤖",  Inches(0.4), Inches(0.18), Inches(0.9), Inches(0.9), sz=46, align=PP_ALIGN.LEFT)
+tb(s,"How IBM Bob (Kiro AI) Built SafeInbox AI",
+   Inches(1.35), Inches(0.2), Inches(10.5), Inches(0.62),
+   sz=26, bold=True, color=C_WHITE)
+tb(s,"IBM Bob was the primary AI development partner — architecture to deployment",
+   Inches(1.35), Inches(0.82), Inches(10.5), Inches(0.38),
+   sz=14, color=C_SKY)
+
+# ── 6 contribution cards (3 × 2 grid) ──
+TOTAL = 21
+bob_cards = [
+    ("🏗  Architecture & Design",
+     ["Proposed async two-layer pipeline","Recommended asyncio.gather() concurrency","Designed Pydantic v2 HttpUrl validation","Structured monorepo layout"],
+     C_ACCENT),
+    ("⚙  Backend Development",
+     ["Wrote complete FastAPI main.py","LLM prompt engineering (strict JSON)","OpenRouter httpx integration","Global error handler (no tracebacks)"],
+     C_SKY),
+    ("🔍  Senior Code Review",
+     ["Audited ALL files before changes","Fixed 15 bugs across backend+frontend","Diagnosed root causes, not patches","CORS, asyncio, dotenv, model slug"],
+     C_GREEN),
+    ("🎨  Frontend Development",
+     ["Built React 18 + Tailwind dark UI","Animated RiskMeter + RiskBadge","AbortController request cancellation","Full ARIA accessibility attributes"],
+     C_YELLOW),
+    ("🚀  DevOps & Deployment",
+     ["Generated render.yaml (IaC)","vercel.json (SPA rewrite + security headers)","DEPLOYMENT.md (6-step guide)","Git push + CI/CD pipeline setup"],
+     C_ORANGE),
+    ("📄  All Documentation",
+     ["README.md — 47 KB, 24 sections","IBM_BOB_USAGE.md for judges","SUBMISSION_ANSWERS.md","This PPT — auto-generated via python-pptx"],
+     RGBColor(0xA5,0xB4,0xFC)),
+]
+
+CW = Inches(4.18)
+CH = Inches(2.42)
+GAP_X = Inches(0.12)
+GAP_Y = Inches(0.12)
+START_X = Inches(0.35)
+START_Y = Inches(1.48)
+
+for i,(title,items,color) in enumerate(bob_cards):
+    cx = START_X + (i%3)*(CW+GAP_X)
+    cy = START_Y + (i//3)*(CH+GAP_Y)
+    # Card background
+    rect(s, cx, cy, CW, CH, C_CARD)
+    # Top colour bar
+    rect(s, cx, cy, CW, Inches(0.42), color)
+    # Title on bar
+    tb(s, title, cx+Inches(0.12), cy+Inches(0.06),
+       CW-Inches(0.22), Inches(0.32),
+       sz=13, bold=True, color=C_BG)
+    # Bullet items
+    ml(s, [f"• {it}" for it in items],
+       cx+Inches(0.14), cy+Inches(0.5),
+       CW-Inches(0.26), CH-Inches(0.58),
+       sz=12, color=C_S300)
+
+# ── Bottom quote strip ──
+rect(s, 0, H-Inches(0.72), W, Inches(0.62), RGBColor(0x1A,0x1F,0x4B))
+tb(s,
+   '"Every file in this repository was designed, written, reviewed & deployed with IBM Bob as the primary AI engineering partner."',
+   Inches(0.5), H-Inches(0.68), Inches(12.3), Inches(0.52),
+   sz=12.5, italic=True, color=C_SKY, align=PP_ALIGN.CENTER)
+
+num(s, 20, TOTAL)
+
+# ════════════════════════════════════════════════════════════════════════════
+# SLIDE 21 — Thank You
 # ════════════════════════════════════════════════════════════════════════════
 s = slide(); bg(s)
 rect(s, 0, 0, W, Inches(0.12), C_ACCENT)
@@ -583,7 +656,7 @@ tb(s,"Backend: https://safeinbox-ai-backend.onrender.com",
    Inches(1.0),Inches(5.92),Inches(11.3),Inches(0.35),sz=13,color=C_SKY,align=PP_ALIGN.CENTER)
 tb(s,"Frontend: https://safeinbox-ai.vercel.app",
    Inches(1.0),Inches(6.32),Inches(11.3),Inches(0.35),sz=13,color=C_SKY,align=PP_ALIGN.CENTER)
-num(s,20)
+num(s, 21, TOTAL)
 
 # ── Save ─────────────────────────────────────────────────────────────────────
 OUT = r"d:\IBM_skillsbuild\SafeInbox_AI_Presentation.pptx"
@@ -592,7 +665,7 @@ try:
     print(f"\n✅  Saved → {OUT}")
     print(f"   Slides: {len(prs.slides)}  |  16:9 widescreen  |  v1.2.0\n")
 except PermissionError:
-    alt = OUT.replace(".pptx","_v120.pptx")
+    alt = OUT.replace(".pptx","_ibmbob.pptx")
     prs.save(alt)
     print(f"\n⚠️  Original file was open — saved as: {alt}")
     print("   Close the old PPTX in PowerPoint, then rename if needed.\n")
